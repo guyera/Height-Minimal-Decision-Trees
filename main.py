@@ -1,12 +1,9 @@
 import math
+import sys
 import numpy as np
 
-from pysmt.shortcuts import Symbol, And, Not, Or, get_model
+from pysmt.shortcuts import Symbol, And, Or, AtMostOne, get_model
 from tqdm import tqdm
-
-
-TEST_EFFICIENT_ROLE_DOMAIN_CLAUSE = False
-TEST_REMOVING_UNUSED_ROLE = True
 
 
 class BinaryTreeNode:
@@ -22,41 +19,16 @@ class BinaryTreeNode:
         self.decision_roles = [[Symbol(f'{path_sequence}|D[{i},{j}]') for i in range(n - 1)] for j in range(d)]
         self.negative_leaf_node_role = Symbol(f'{path_sequence}|-')
         self.positive_leaf_node_role = Symbol(f'{path_sequence}|+')
-        if not TEST_REMOVING_UNUSED_ROLE:
-            self.unused_role = Symbol(f'{path_sequence}|NONE')
-            roles = [dr for drs in self.decision_roles for dr in drs] + [self.negative_leaf_node_role] + [self.positive_leaf_node_role] + [self.unused_role]
-        else:
-            roles = [dr for drs in self.decision_roles for dr in drs] + [self.negative_leaf_node_role] + [self.positive_leaf_node_role]
-            self.roles = roles
+        roles = [dr for drs in self.decision_roles for dr in drs] + [self.negative_leaf_node_role] + [self.positive_leaf_node_role]
+        self.roles = roles
 
-        if TEST_REMOVING_UNUSED_ROLE:
-            exact_role_clause_list = []
-            for true_role in roles:
-                exact_role_clause_list.append(And([role if role is true_role else Not(role) for role in roles]))
-            no_role_clause = And([Not(role) for role in roles])
-            self.role_domain_clause = Or(Or(exact_role_clause_list), no_role_clause)
-        elif TEST_EFFICIENT_ROLE_DOMAIN_CLAUSE:
-            exact_role_clause_list = []
-            for true_role in roles:
-                exact_role_clause_list.append(And([role if role is true_role else Not(role) for role in roles]))
-            self.role_domain_clause = Or(exact_role_clause_list)
-        else:
-            # At least one role must be true
-            at_least_one_true_clause = Or(roles)
+        # exact_role_clause_list = []
+        # for true_role in roles:
+        #     exact_role_clause_list.append(And([role if role is true_role else Not(role) for role in roles]))
+        # no_role_clause = And([Not(role) for role in roles])
+        # self.role_domain_clause = Or(Or(exact_role_clause_list), no_role_clause)
 
-            # No two different roles in a pair can be true
-            no_true_pairs_clauses = []
-            for role1_idx in range(len(roles)):
-                for role2_idx in range(len(roles)):
-                    if role1_idx == role2_idx:
-                        continue
-                    role1 = roles[role1_idx]
-                    role2 = roles[role2_idx]
-                    no_true_pairs_clauses.append(Or(Not(role1), Not(role2)))
-            no_true_pairs_clause = And(no_true_pairs_clauses)
-
-            # The AND of these clauses means that exactly one role must be true
-            self.role_domain_clause = And(at_least_one_true_clause, no_true_pairs_clause)
+        self.role_domain_clause = AtMostOne(roles)
 
 
 class BinaryTree:
@@ -74,7 +46,7 @@ class BinaryTree:
         if silent:
             progress = None
         else:
-            progress = tqdm(total=(2 ** (h - 1)) * 2 - 1, desc='Building complete binary tree, compiling role domain clause')
+            progress = tqdm(total=(2 ** (h - 1)) * 2 - 1, desc='Compiling role domain clause')
 
         root_node = self.build_node('', n, d, h, progress)
 
@@ -333,14 +305,9 @@ class DecisionTree:
         self.root = self.root.track_prune(tracking_tree.root)
 
     def from_symbol_node(symbol_node, sorted_data_values, model):
-        if TEST_REMOVING_UNUSED_ROLE:
-            value_dict = model.get_py_values(symbol_node.roles)
-            if all(not value for value in value_dict.values()):
-                return None
-        else:
-            unused = model.get_py_value(symbol_node.unused_role)
-            if unused:
-                return None
+        value_dict = model.get_py_values(symbol_node.roles)
+        if all(not value for value in value_dict.values()):
+            return None
 
         negative_leaf_class = model.get_py_value(symbol_node.negative_leaf_node_role)
         positive_leaf_class = model.get_py_value(symbol_node.positive_leaf_node_role)
@@ -397,7 +364,7 @@ class DecisionTree:
                         break
 
             # Now return the node
-            return DecisionTreeNode(left_child=left_child, right_child=right_child, decision_idx = decision_idx, decision_value = decision_value)
+            return DecisionTreeNode(left_child=left_child, right_child=right_child, decision_idx=decision_idx, decision_value=decision_value)
 
     def from_symbol_tree(symbol_tree, data, sorted_data_values, model):
         # Crudely construct the tree. This will remove unused nodes as well as
@@ -415,11 +382,16 @@ class DecisionTree:
 
 
 def main():
-    n = 32
-    d = 4
-    h = math.ceil(math.log(n, 2)) + 1
-    vectors = np.random.rand(n, d)
-    labels = np.random.randint(2, size=n, dtype=bool)
+    if len(sys.argv) != 3:
+        raise ValueError("Bad calling syntax: {} vectors_fname labels_fname".format(sys.argv[0]))
+
+    vectors_fname = sys.argv[1]
+    labels_fname = sys.argv[2]
+
+    vectors = np.loadtxt(vectors_fname, delimiter=',')
+    labels = np.loadtxt(labels_fname, delimiter=',', dtype=bool)
+
+    n, d = vectors.shape
 
     # When compiling the formula, for each feature dimension, for each data
     # point, the algorithm an index which specifies the first data point, when
@@ -502,24 +474,32 @@ def main():
     # namely itself. The "greater than or equal to" terminology is just easier
     # to understand in the context of the SAT reduction)
 
-    # Construct complete hypothetical tree
-    tree = BinaryTree(n, d, h)
-    formula = tree.compile_formula(labels, sorted_data_indices)
+    for h in range(1, math.ceil(math.log(n, 2)) + 1):
 
-    model = get_model(formula)
+        # Construct complete hypothetical tree
+        tree = BinaryTree(n, d, h)
+        formula = tree.compile_formula(labels, sorted_data_indices)
+
+        model = get_model(formula)
+
+        if model is not None:
+            break
+
+        print(f'No model found for h={h}')
 
     if model is None:
-        print('No model')
+        print('No model found for any choice of h')
     else:
-        print('Model found')
-        sorted_data_values = [[item[1] for item in l] for l in sorted_data_lists]
+        print(f'Model found for h={h}')
+        sorted_data_values = [[item[1] for item in sorted_data_list] for sorted_data_list in sorted_data_lists]
         dt = DecisionTree.from_symbol_tree(tree, vectors, sorted_data_values, model)
         predictions = dt.predict(vectors)
         correct = labels == predictions
         num_correct = correct.astype(int).sum()
         accuracy = float(num_correct) / len(labels)
         print(f'Accuracy: {accuracy}')
-        tree.compile_valid_point_propagation_clause(tree.root, 2, labels, sorted_data_indices, model=model)
+        # tree.compile_valid_point_propagation_clause(tree.root, 2, labels, sorted_data_indices, model=model)
+
 
 if __name__ == '__main__':
     main()
